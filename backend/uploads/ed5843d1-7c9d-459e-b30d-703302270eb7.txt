@@ -1,0 +1,4 @@
+Quarterly Sales Report - Northwind Traders
+Total revenue for Q2 2026 was $1,842,300, an increase of 12% over Q1.
+The top-performing region was the Pacific Northwest, led by sales rep Elena Vasquez.
+Customer churn dropped to 3.1%, the lowest in company history.

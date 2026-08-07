@@ -1,0 +1,154 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light theme - same blue->purple brand gradient as dark, on light
+       surfaces, so the theme toggle stays fully supported. */
+    --background: 240 30% 98%;
+    --foreground: 240 15% 12%;
+    --sidebar: 240 35% 96%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 15% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 15% 12%;
+    --primary: 245 75% 59%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 20% 93%;
+    --secondary-foreground: 240 15% 15%;
+    --muted: 240 20% 94%;
+    --muted-foreground: 240 8% 46%;
+    --accent: 240 25% 91%;
+    --accent-foreground: 240 15% 15%;
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 20% 87%;
+    --input: 240 20% 87%;
+    --ring: 245 75% 59%;
+    --radius: 1rem;
+
+    /* Brand gradient - blue to purple, used for primary buttons, active
+       states, the logo mark, and user message bubbles. */
+    --gradient-from: 230 85% 60%;
+    --gradient-to: 271 76% 63%;
+    --brand: 245 75% 59%;
+    --brand-foreground: 0 0% 100%;
+
+    --glass-surface: 0 0% 100%;
+    --glass-surface-alpha: 1;
+    --glass-border: 240 20% 87%;
+    --glass-border-alpha: 1;
+  }
+
+  .dark {
+    /* Dark theme - deep navy canvas, cards a shade lighter, blue->purple
+       gradient as the single brand accent everywhere else stays flat. */
+    --background: 230 28% 7%;
+    --foreground: 0 0% 96%;
+    --sidebar: 231 30% 8.5%;
+    --card: 230 22% 13%;
+    --card-foreground: 0 0% 96%;
+    --popover: 230 24% 11%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 245 80% 66%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 230 18% 17%;
+    --secondary-foreground: 0 0% 94%;
+    --muted: 230 16% 16%;
+    --muted-foreground: 230 10% 63%;
+    --accent: 230 18% 19%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 0 70% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 230 16% 20%;
+    --input: 230 16% 20%;
+    --ring: 245 80% 66%;
+
+    --gradient-from: 231 88% 64%;
+    --gradient-to: 271 78% 68%;
+    --brand: 245 80% 66%;
+    --brand-foreground: 0 0% 100%;
+
+    --glass-surface: 230 22% 13%;
+    --glass-surface-alpha: 1;
+    --glass-border: 230 16% 20%;
+    --glass-border-alpha: 1;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+@layer components {
+  /* -------------------------------------------------------------------- */
+  /* Flat surfaces - kept as separate classes from --card so a future      */
+  /* theme could still opt into translucency in one place.                 */
+  /* -------------------------------------------------------------------- */
+  .aurora-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: hsl(var(--background));
+    pointer-events: none;
+  }
+
+  .aurora-backdrop::before,
+  .aurora-backdrop::after,
+  .aurora-blob-3 {
+    content: none;
+    display: none;
+  }
+
+  .glass {
+    background-color: hsl(var(--glass-surface));
+    border: 1px solid hsl(var(--glass-border));
+  }
+
+  .glass-strong {
+    background-color: hsl(var(--glass-surface));
+    border: 1px solid hsl(var(--glass-border));
+  }
+
+  .glass-subtle {
+    background-color: hsl(var(--secondary));
+    border: 1px solid transparent;
+  }
+
+  /* -------------------------------------------------------------------- */
+  /* Brand gradient - the one accent used throughout: New Chat button,     */
+  /* send button, user bubbles, the logo mark, active nav states.          */
+  /* -------------------------------------------------------------------- */
+  .gradient-brand {
+    background-image: linear-gradient(135deg, hsl(var(--gradient-from)), hsl(var(--gradient-to)));
+  }
+
+  .gradient-brand-text {
+    background-image: linear-gradient(135deg, hsl(var(--gradient-from)), hsl(var(--gradient-to)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .glow-primary {
+    box-shadow: 0 8px 24px -8px hsl(var(--gradient-to) / 0.5);
+  }
+
+  .chat-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .chat-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .chat-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-muted rounded-full;
+  }
+  .chat-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/50;
+  }
+}

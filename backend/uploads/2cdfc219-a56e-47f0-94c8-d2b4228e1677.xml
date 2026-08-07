@@ -1,0 +1,7 @@
+<config>
+  <service name="billing-api">
+    <endpoint>https://billing.internal/v2</endpoint>
+    <timeout_seconds>30</timeout_seconds>
+    <owner>Platform Team</owner>
+  </service>
+</config>
