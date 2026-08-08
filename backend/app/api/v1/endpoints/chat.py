@@ -16,6 +16,7 @@ from app.repositories import FeedbackRepository, MessageRepository
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
+    EditMessageRequest,
     FeedbackRead,
     FeedbackRequest,
     RegenerateRequest,
@@ -99,6 +100,38 @@ async def regenerate_chat(
 
     async def event_generator() -> AsyncIterator[str]:
         async for event in service.regenerate_stream(user.id, request.thread_id, request.message_id):
+            yield f"data: {json.dumps(event, default=str)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/edit/stream", summary="Edit a user message in place and regenerate everything after it")
+async def edit_message(
+    request: EditMessageRequest,
+    user: CurrentUser,
+    db: DbDep,
+) -> StreamingResponse:
+    """Stream a freshly-generated reply after editing an earlier user message.
+
+    Truncates the conversation from the edited message onward (old reply and
+    anything sent after it) - same ownership-check pattern as regenerate.
+    """
+    thread_service = ThreadService(db)
+    await thread_service.get(request.thread_id, user.id)
+    service = _get_chat_service(db)
+
+    async def event_generator() -> AsyncIterator[str]:
+        async for event in service.edit_and_regenerate_stream(
+            user.id, request.thread_id, request.message_id, request.content
+        ):
             yield f"data: {json.dumps(event, default=str)}\n\n"
 
     return StreamingResponse(

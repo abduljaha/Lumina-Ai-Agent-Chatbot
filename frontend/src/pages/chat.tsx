@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
 import { ChatHeader } from "@/components/chat/chat-header";
-import { useMessages, streamChat, regenerateChat } from "@/hooks/use-messages";
+import { useMessages, streamChat, regenerateChat, editChat } from "@/hooks/use-messages";
 import { useCreateThread, useThread } from "@/hooks/use-threads";
 import type { Message, StreamEvent } from "@/types";
 
@@ -40,6 +40,16 @@ export function ChatPage() {
   // in place in the persisted list itself until that refetch lands.
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const [regeneratingContent, setRegeneratingContent] = useState("");
+  // While an edit is in flight: `targetId` is the message being edited,
+  // `content` is its new text (shown immediately in place of the old text),
+  // and everything after it in the merged view is hidden - the server is
+  // about to delete those rows too, since they answered a prompt that no
+  // longer exists once the edit lands.
+  const [editState, setEditState] = useState<{
+    targetId: string;
+    content: string;
+    assistantContent: string;
+  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const createThread = useCreateThread();
 
@@ -81,6 +91,7 @@ export function ChatPage() {
     setToolStatus(null);
     setRegeneratingId(null);
     setRegeneratingContent("");
+    setEditState(null);
   }, [threadId]);
 
   // Cancel any in-flight request if the page itself unmounts (e.g.
@@ -252,9 +263,32 @@ export function ChatPage() {
     setToolStatus(null);
   }, []);
 
-  const displayMessages = [...localMessages, ...messages].map((m) =>
-    m.id === regeneratingId ? { ...m, content: regeneratingContent } : m
-  );
+  const displayMessages = (() => {
+    const base = [...localMessages, ...messages].map((m) =>
+      m.id === regeneratingId ? { ...m, content: regeneratingContent } : m
+    );
+    if (!editState) return base;
+    const idx = base.findIndex((m) => m.id === editState.targetId);
+    if (idx === -1) return base;
+    // Truncate to the edited message (with its new content) and append a
+    // fresh assistant placeholder - mirrors what the server is doing
+    // (delete everything after the edited message, then generate one new
+    // reply), so the view doesn't show stale messages mid-edit.
+    const truncated = base
+      .slice(0, idx + 1)
+      .map((m, i) => (i === idx ? { ...m, content: editState.content } : m));
+    const assistantPlaceholder: Message = {
+      id: `editing-${editState.targetId}`,
+      thread_id: threadId ?? "",
+      role: "assistant",
+      content: editState.assistantContent,
+      attachments: [],
+      images: [],
+      metadata_: {},
+      created_at: new Date().toISOString(),
+    };
+    return [...truncated, assistantPlaceholder];
+  })();
 
   const handleRegenerate = useCallback(
     async (messageId: string) => {
@@ -319,6 +353,71 @@ export function ChatPage() {
     [threadId, queryClient]
   );
 
+  const handleEdit = useCallback(
+    async (messageId: string, newContent: string) => {
+      if (!threadId || isStreaming) return;
+      const myRequestId = ++requestIdRef.current;
+      const isCurrent = () => requestIdRef.current === myRequestId;
+
+      setIsStreaming(true);
+      setToolStatus(null);
+      setEditState({ targetId: messageId, content: newContent, assistantContent: "" });
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      let wasAborted = false;
+      try {
+        await editChat(
+          threadId,
+          messageId,
+          newContent,
+          (event: StreamEvent) => {
+            if (!isCurrent()) return;
+            if (event.type === "tool_call") {
+              setToolStatus(describeToolActivity(event.data));
+            }
+            if ((event.type === "token" || event.type === "message") && event.content) {
+              setToolStatus(null);
+              setEditState((prev) => (prev ? { ...prev, assistantContent: event.content ?? "" } : prev));
+            }
+            if (event.type === "error") {
+              setToolStatus(null);
+              setEditState((prev) =>
+                prev ? { ...prev, assistantContent: `⚠️ ${event.content || "An error occurred"}` } : prev
+              );
+            }
+          },
+          controller.signal
+        );
+      } catch (error) {
+        if (!isCurrent()) return;
+        if ((error as Error).name === "AbortError") {
+          wasAborted = true;
+        } else {
+          setEditState((prev) =>
+            prev ? { ...prev, assistantContent: "⚠️ Failed to get response. Please try again." } : prev
+          );
+        }
+      } finally {
+        // Same reasoning as handleSend/handleRegenerate: wait for the
+        // persisted refetch (now reflecting the edit + truncation) before
+        // dropping the override, so there's no flicker back to pre-edit
+        // content in between.
+        await queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        await queryClient.invalidateQueries({ queryKey: ["threads"] });
+        if (isCurrent()) {
+          setIsStreaming(false);
+          setToolStatus(null);
+          abortRef.current = null;
+          if (!wasAborted) {
+            setEditState(null);
+          }
+        }
+      }
+    },
+    [threadId, isStreaming, queryClient]
+  );
+
   const handleRetry = useCallback(() => {
     // Regenerating mid-stream would race the in-flight request against a
     // new one over the same assistant slot - Stop first, then retry.
@@ -353,6 +452,7 @@ export function ChatPage() {
           isStreaming={isStreaming}
           toolStatus={toolStatus}
           onRetry={handleRetry}
+          onEdit={handleEdit}
           onExampleSelect={handleSend}
         />
       </div>

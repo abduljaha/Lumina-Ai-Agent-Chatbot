@@ -142,7 +142,7 @@ class Settings(BaseSettings):
 
     # --- Model settings ---
     max_tokens: int = 4096
-    temperature: float = 0.7
+    temperature: float = 0.4
     stream_timeout_seconds: int = 60
 
     @model_validator(mode="after")

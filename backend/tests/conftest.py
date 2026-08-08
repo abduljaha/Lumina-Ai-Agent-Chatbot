@@ -66,6 +66,17 @@ async def _setup_test_db() -> AsyncGenerator[None, None]:
 
 
 @pytest_asyncio.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Provide a raw session on the same in-memory test DB `client` uses.
+
+    For tests that exercise a service/repository directly (no HTTP layer
+    involved) but still need real persistence to assert against.
+    """
+    async with _test_session_factory() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     """Provide an async test client with the test DB dependency override."""
     from app.main import app

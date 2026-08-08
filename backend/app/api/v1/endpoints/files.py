@@ -150,25 +150,27 @@ async def upload_document(
         from app.core.container import app_container
 
         processor = DocumentProcessor()
-        chunks = await processor.process(str(stored_path), document.filename)
-        logger.info("Document %s: extracted %d chunk(s)", document.id, len(chunks))
+        chunks, doc_metadata = await processor.process(str(stored_path), document.filename)
+        logger.info(
+            "Document %s: extracted %d chunk(s) via %s",
+            document.id, len(chunks), doc_metadata.get("extraction_method", "n/a"),
+        )
 
         if not chunks:
             # Extraction ran without raising but produced nothing usable
-            # (empty/corrupt file, unsupported content inside a supported
-            # extension, OCR unavailable, ...) - this must NOT be reported
-            # as READY: a "successful" document with zero retrievable
-            # content is exactly what produces "I don't see any file" once
-            # a question about it reaches the LLM with empty RAG context.
+            # (empty/corrupt file, password-protected PDF, OCR/vision
+            # unavailable, ...) - this must NOT be reported as READY: a
+            # "successful" document with zero retrievable content is
+            # exactly what produces "I don't see any file" once a question
+            # about it reaches the LLM with empty RAG context. The specific
+            # reason (see DocumentProcessor.process) is preserved rather
+            # than replaced with a generic message, so a password-protected
+            # PDF and a genuinely blank file don't look identical to the user.
             document.status = DocumentStatus.FAILED
-            document.metadata_ = {
-                **document.metadata_,
-                "error": "No text could be extracted from this file. It may be empty, "
-                "corrupted, image-based without OCR support, or in an unexpected format.",
-            }
+            document.metadata_ = {**document.metadata_, "error": doc_metadata.get("error")}
             await doc_repo.update(document)
             await doc_repo.commit()
-            logger.warning("Document %s marked FAILED: no extractable text", document.id)
+            logger.warning("Document %s marked FAILED: %s", document.id, doc_metadata.get("error"))
             return DocumentRead.model_validate(document)
 
         embedder = app_container.get_embedder()
@@ -200,9 +202,18 @@ async def upload_document(
 
         document.chunk_count = len(chunks)
         document.status = DocumentStatus.READY
+        # Preserved for the UI/API to show *how* this document's content was
+        # obtained (e.g. "OCR" or "hybrid" for a scanned PDF, "vision_description"
+        # for a photo with no text) - reassigned rather than mutated in place,
+        # same reason as the failure path below (see its comment).
+        document.metadata_ = {
+            **document.metadata_,
+            "extraction_method": doc_metadata.get("extraction_method"),
+            **{k: v for k, v in doc_metadata.items() if k not in ("extraction_method", "error")},
+        }
         logger.info(
-            "Document %s ready: %d chunk(s) indexed (thread_id=%s)",
-            document.id, document.chunk_count, thread_id,
+            "Document %s ready: %d chunk(s) indexed via %s (thread_id=%s)",
+            document.id, document.chunk_count, doc_metadata.get("extraction_method"), thread_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Document %s processing failed", document.id)

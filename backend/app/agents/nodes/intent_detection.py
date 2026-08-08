@@ -101,6 +101,24 @@ _SEARCH_PATTERNS = [
 # genuine live-data questions phrased in ways no fixed pattern list covers,
 # so this list can now afford to favor precision over recall.
 
+# Release/availability status - "is X released", "release date of X", "is X
+# out yet" - is a narrower, more targeted signal than a bare year: asking
+# whether something has *happened yet* is inherently a check against the
+# present moment, unlike a statement merely mentioning a year. Without this,
+# a question like "is <film/game/album> 2026 released or not" fell through
+# every bucket (no match for any _WIKI_PATTERNS phrasing like "what is"/"who
+# is" either, since it starts with "is") straight to plain chat, and the
+# model - per its own training data cutoff - guessed or fabricated a status
+# instead of checking.
+_RELEASE_STATUS_PATTERNS = [
+    r"\breleased?\s+(or not|yet|already)\b",
+    r"\brelease date\b",
+    r"\bwhen (is|does|will|was)\b.{0,40}\b(release|come out|launch|premiere|drop)\b",
+    r"\bcoming out\b",
+    r"\bout yet\b",
+    r"\bhas\b.{0,40}\b(released?|launched|premiered|dropped)\b",
+]
+
 # Explicitly "changes minute to minute" phrasing - routed to serp_search
 # (live Google results) in preference to the plain web_search scraper when
 # SerpAPI is configured, since these need a fresh instant answer rather than
@@ -184,7 +202,9 @@ class IntentDetectionNode:
 
         needs_search = self._matches(content, _PRICE_PATTERNS) or self._matches(
             content, _DISTANCE_PATTERNS
-        ) or self._matches(content, _LIVE_DATA_PATTERNS) or self._matches(content, _SEARCH_PATTERNS)
+        ) or self._matches(content, _LIVE_DATA_PATTERNS) or self._matches(
+            content, _SEARCH_PATTERNS
+        ) or self._matches(content, _RELEASE_STATUS_PATTERNS)
         if needs_search:
             # Prefer SerpAPI's live Google results when configured - the free
             # web_search tool scrapes DuckDuckGo/Google directly and is prone

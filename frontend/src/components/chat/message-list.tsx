@@ -9,6 +9,7 @@ interface MessageListProps {
   isStreaming?: boolean;
   toolStatus?: string | null;
   onRetry?: () => void;
+  onEdit?: (messageId: string, newContent: string) => void;
   onExampleSelect?: (message: string) => void;
 }
 
@@ -17,6 +18,7 @@ export function MessageList({
   isStreaming,
   toolStatus,
   onRetry,
+  onEdit,
   onExampleSelect,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -50,6 +52,10 @@ export function MessageList({
                 // clicking retry on an old message and having it silently
                 // regenerate a completely different (the newest) one.
                 onRetry={isLast && message.role === "assistant" ? onRetry : undefined}
+                // Unlike retry, editing any past user message is valid, not
+                // just the latest - it legitimately branches/truncates the
+                // conversation from that point, same as ChatGPT.
+                onEdit={message.role === "user" ? onEdit : undefined}
               />
             );
           })

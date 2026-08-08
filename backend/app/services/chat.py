@@ -433,6 +433,95 @@ class ChatService:
 
         yield {"type": "done", "message_id": str(assistant_message.id)}
 
+    async def edit_and_regenerate_stream(
+        self,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        new_content: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Edit a user message in place and regenerate everything after it.
+
+        Matches the common "edit a prompt" UX (ChatGPT and similar): editing
+        a message truncates the conversation from that point - the old
+        reply, and anything the user sent after it, were all answering a
+        prompt that no longer exists once it's replaced, so they're deleted
+        rather than left as orphaned branches alongside the new one.
+        """
+        from sqlalchemy import select
+
+        message = await self._message_repo.get(message_id)
+        if not message or message.thread_id != thread_id or message.role != MessageRole.USER:
+            yield {"type": "error", "content": "Message not found"}
+            return
+
+        stmt = select(Message).where(
+            Message.thread_id == thread_id,
+            Message.created_at > message.created_at,
+        )
+        result = await self._db.execute(stmt)
+        for stale in result.scalars().all():
+            await self._message_repo.delete(stale)
+
+        message.content = new_content
+        await self._message_repo.update(message)
+        await self._message_repo.commit()
+        await self._remember_personal_info(user_id, new_content)
+
+        user_settings = await self._user_service.get_settings(user_id)
+        history = await self._load_history_messages(thread_id)
+        state = self._build_state(
+            user_id=user_id,
+            thread_id=thread_id,
+            messages=history,
+            custom_system_prompt=user_settings.get("system_prompt") or None,
+        )
+
+        yield {"type": "start", "thread_id": thread_id}
+
+        full_generation = ""
+        current_model: str | None = None
+        current_provider: str | None = None
+        try:
+            async for event in self._graph.stream(state):
+                for node_name, update in event.items():
+                    if update.get("current_model"):
+                        current_model = update["current_model"]
+                    if update.get("current_provider"):
+                        current_provider = update["current_provider"]
+                    if "generation" in update and update.get("generation"):
+                        full_generation = update["generation"]
+                        yield {"type": "token", "content": update["generation"]}
+                    if "tool_results" in update and update.get("tool_results"):
+                        yield {"type": "tool_call", "data": update["tool_results"]}
+                    if update.get("needs_user_input"):
+                        full_generation = update.get("pending_question") or full_generation
+                        yield {"type": "message", "content": update.get("pending_question")}
+        except Exception as exc:  # noqa: BLE001
+            # The edited message and truncation are already committed above -
+            # without this, a failed regeneration left the thread with the
+            # edited prompt and no reply at all.
+            await self._persist_failed_turn(thread_id, str(exc))
+            yield {"type": "error", "content": str(exc)}
+            return
+
+        assistant_message = Message(
+            thread_id=thread_id,
+            role=MessageRole.ASSISTANT,
+            content=full_generation,
+            model=current_model,
+            metadata_={"provider": current_provider},
+        )
+        await self._message_repo.create(assistant_message)
+        await self._message_repo.commit()
+        self._schedule_llm_profile_update(user_id, new_content, full_generation)
+
+        yield {
+            "type": "done",
+            "message_id": str(assistant_message.id),
+            "edited_message_id": str(message.id),
+        }
+
     async def _get_last_user_message_before(self, thread_id: str, before: Any) -> Message | None:
         """Find the most recent USER message before a given timestamp in a thread."""
         from sqlalchemy import select

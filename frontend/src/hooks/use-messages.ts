@@ -139,3 +139,21 @@ export async function regenerateChat(
 ): Promise<void> {
   return postSSE("/chat/regenerate/stream", { thread_id: threadId, message_id: messageId }, onEvent, signal);
 }
+
+/** Edits a user message in place and streams a fresh reply - the server
+ * truncates everything after the edited message (old reply and anything
+ * sent afterward), same as editing a prompt in ChatGPT. */
+export async function editChat(
+  threadId: string,
+  messageId: string,
+  content: string,
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return postSSE(
+    "/chat/edit/stream",
+    { thread_id: threadId, message_id: messageId, content },
+    onEvent,
+    signal
+  );
+}

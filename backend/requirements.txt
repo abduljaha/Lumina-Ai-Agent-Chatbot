@@ -46,6 +46,7 @@ sentence-transformers==3.3.1
 # RAG / Search
 rank-bm25==0.2.2
 pypdf==5.1.0
+pymupdf==1.28.2
 python-docx==1.1.2
 python-pptx==1.0.2
 openpyxl==3.1.5
@@ -68,8 +69,12 @@ duckduckgo-search==7.1.1
 sse-starlette==2.2.0
 openai-whisper==20240930
 gTTS==2.5.4
+# Primary OCR engine - pure Python/ONNX, no system Tesseract binary needed
+# (installing that binary needs admin rights, which isn't reliably available
+# in every deployment/dev environment). pytesseract is kept as a secondary
+# fallback for environments where the Tesseract binary IS present.
+rapidocr-onnxruntime==1.4.4
 pytesseract==0.3.13
-opencv-python-headless==4.10.0.84
 
 # Security
 cryptography==44.0.0
@@ -86,6 +91,7 @@ opentelemetry-exporter-otlp==1.29.0
 pytest==8.3.4
 pytest-asyncio==0.25.0
 pytest-cov==6.0.0
+reportlab==5.0.0
 httpx==0.28.1
 fakeredis==2.26.1
 

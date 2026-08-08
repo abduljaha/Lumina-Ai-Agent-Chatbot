@@ -127,6 +127,14 @@ class RegenerateRequest(BaseModel):
     message_id: str
 
 
+class EditMessageRequest(BaseModel):
+    """Request to edit a user message in place and regenerate everything after it."""
+
+    thread_id: str
+    message_id: str
+    content: str = Field(min_length=1, max_length=10000)
+
+
 class ChatResponse(BaseModel):
     """Chat completion response (non-streaming)."""
 
