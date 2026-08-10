@@ -26,6 +26,7 @@ class CurrentTimeTool:
     ) -> ToolResult:
         """Return the current time, resolving `location` to a timezone if given."""
         resolved_timezone = timezone
+        resolved_location = location
         if location and not timezone:
             from app.tools.geocoding import geocode
 
@@ -33,6 +34,9 @@ class CurrentTimeTool:
             if not geocoded or not geocoded.get("timezone"):
                 return ToolResult(success=False, error=f"Could not find location: {location}")
             resolved_timezone = geocoded["timezone"]
+            resolved_location = geocoded.get("resolved_name") or location
+            if geocoded.get("country"):
+                resolved_location = f"{resolved_location}, {geocoded['country']}"
 
         try:
             from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -46,7 +50,7 @@ class CurrentTimeTool:
                     "timezone": str(tz),
                     "date": now.strftime("%Y-%m-%d"),
                     "time": now.strftime("%H:%M:%S"),
-                    "location": location or None,
+                    "location": resolved_location or None,
                 },
                 metadata={"timezone": str(tz)},
             )

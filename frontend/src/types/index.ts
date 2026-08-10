@@ -124,3 +124,9 @@ export interface DocumentInfo {
   metadata_?: Record<string, unknown>;
   created_at: string;
 }
+
+export interface AiTool {
+  name: string;
+  description: string;
+  example_prompt: string;
+}

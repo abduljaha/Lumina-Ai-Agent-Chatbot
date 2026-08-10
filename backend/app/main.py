@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.core.dependency_check import check_rag_dependencies
 from app.core.di import container
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestLoggingMiddleware, setup_logging
@@ -23,12 +24,14 @@ from app.db.session import init_db
 
 settings = get_settings()
 logger = logging.getLogger("app")
+_dependency_status: dict[str, bool] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan - startup and shutdown hooks."""
     logger.info("Starting %s v%s ...", settings.app_name, settings.app_version)
+    _dependency_status.update(check_rag_dependencies())
     await container.startup()
     try:
         await init_db()
@@ -95,6 +98,7 @@ def create_app() -> FastAPI:
             "app": settings.app_name,
             "version": settings.app_version,
             "env": settings.app_env,
+            "rag_dependencies": _dependency_status,
         }
 
     # Root endpoint

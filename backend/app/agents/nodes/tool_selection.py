@@ -1,59 +1,14 @@
 """Tool selection node - choose and execute tools."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from typing import Any
 
+from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger("app")
-
-# Applied uniformly to every tool call here rather than per-tool, so a tool
-# with no timeout/retry logic of its own (wikipedia, web_search's inner
-# libraries, ...) still can't hang a whole turn or die on one transient
-# blip - this is the single enforcement point for "every tool is reliable"
-# instead of duplicating the same wait_for/retry boilerplate in each tool.
-_TOOL_TIMEOUT_SECONDS = 20
-_MAX_TOOL_ATTEMPTS = 3
-_TRANSIENT_ERROR_HINTS = (
-    "timeout", "timed out", "connection", "temporarily", "rate limit",
-    "rate-limit", "429", "502", "503", "504", "unavailable", "reset by peer",
-)
-
-# Tools that should transparently retry against a different tool when the
-# preferred one fails outright, rather than just returning nothing. Both
-# sides take the same {"query": ...} argument shape, so no remapping is
-# needed. serp_search's own "not configured" error message has said
-# "falling back to web_search" since it was written (see serp_search.py) -
-# this is what actually makes that happen, for every failure mode (quota
-# exhausted, bad key, outage), not just the "no key configured" case.
-_FALLBACK_TOOLS = {"serp_search": "web_search"}
-
-
-def _is_transient(result_dict: dict[str, Any]) -> bool:
-    """Whether a tool failure looks worth retrying vs. a deterministic one.
-
-    Deterministic failures (bad input, unsupported expression, "no query
-    provided") will fail identically on retry - only network/availability
-    -shaped errors are worth spending the extra attempts on.
-
-    Prefers an explicit `metadata["transient"]` flag when a tool sets one
-    (see serp_search.py, which classifies by exception type/HTTP status
-    rather than guessing from message text) - falls back to substring
-    matching on the error message for tools that don't set it, since some
-    transient exceptions (e.g. httpx connect timeouts) stringify to an
-    empty or generic message that no keyword list would ever match.
-    """
-    metadata = result_dict.get("metadata") or {}
-    if "transient" in metadata:
-        return bool(metadata["transient"])
-    error = result_dict.get("error")
-    if not error:
-        return False
-    lowered = error.lower()
-    return any(hint in lowered for hint in _TRANSIENT_ERROR_HINTS)
 
 # Captures the place name after a preposition, stopping at sentence-ending
 # punctuation or a conjunction so "...time and weather in Paris and London"
@@ -68,6 +23,47 @@ def _extract_location(text: str) -> str:
     """Pull a place name out of a free-form query, e.g. '... in Madhapur, Hyderabad.'"""
     match = _LOCATION_PATTERN.search(text)
     return match.group(1).strip().rstrip(",") if match else ""
+
+
+# Splits a compound multi-tool query into clauses for LOCATION SCOPING only
+# (kept separate from `_CLAUSE_SPLIT_PATTERN` below, which is for isolating
+# the search-query clause and must not change behavior there). A bare comma
+# is deliberately NOT a boundary on its own - "weather in Madhapur,
+# Hyderabad" needs that comma to stay inside one clause - but a comma
+# immediately followed by what looks like the start of a new question
+# ("what", "is", "and what", ...) is: "weather in bangalore, what time is
+# it in tokyo" is two questions, not one compound place name.
+_LOCATION_CLAUSE_BOUNDARY = re.compile(
+    r"[.;]\s+|\s+(?:and|but)\s+|,\s*(?:and\s+)?(?=(?:what|when|is|does|will|how)\b)",
+    re.IGNORECASE,
+)
+_WEATHER_KEYWORDS = re.compile(r"\b(weather|temperature|forecast|rain|snow|humid|climate)\b", re.IGNORECASE)
+_TIME_KEYWORDS = re.compile(r"\b(time|date|clock)\b", re.IGNORECASE)
+_LOCATION_KEYWORDS_BY_TOOL = {"weather": _WEATHER_KEYWORDS, "current_time": _TIME_KEYWORDS}
+
+
+def _extract_location_for_tool(text: str, tool_name: str) -> str:
+    """Extract a location scoped to the clause that actually mentions this tool.
+
+    `_extract_location` always returns the FIRST "in X" match in the whole
+    message - fine for a single-location query, but a compound one like
+    "weather in Bangalore, what time is it in Tokyo" has two "in X" clauses,
+    one per tool, and both the weather and current_time argument-building
+    calls would otherwise land on the same (wrong, for one of them) match.
+    Splits into clauses first and searches only the one containing this
+    tool's own keywords; falls back to whole-text extraction (unchanged
+    behavior) when there's nothing to disambiguate.
+    """
+    keyword_pattern = _LOCATION_KEYWORDS_BY_TOOL.get(tool_name)
+    if keyword_pattern is not None:
+        clauses = [c.strip() for c in _LOCATION_CLAUSE_BOUNDARY.split(text) if c.strip()]
+        if len(clauses) > 1:
+            matching = [c for c in clauses if keyword_pattern.search(c)]
+            if matching:
+                scoped = _extract_location(matching[0])
+                if scoped:
+                    return scoped
+    return _extract_location(text)
 
 
 # Requires at least one operator between digits, so a stray number ("top 5
@@ -132,8 +128,12 @@ class ToolSelectionNode:
     by intent_detection, not just the first one.
     """
 
-    def __init__(self, tool_registry: ToolRegistry) -> None:
+    def __init__(self, tool_registry: ToolRegistry, tool_executor: ToolExecutor | None = None) -> None:
         self._registry = tool_registry
+        # Falls back to a private executor (e.g. for tests constructing this
+        # node directly) - production wiring always shares one process-wide
+        # instance with LLMNode via AgentGraph/AppContainer, see executor.py.
+        self._executor = tool_executor or ToolExecutor(tool_registry)
 
     async def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         """Execute the selected tool(s) and return results."""
@@ -153,101 +153,20 @@ class ToolSelectionNode:
                 "tool_results": [],
             }
 
-        # Run independently-detected tools concurrently (each is its own
+        # Independently-detected tools run concurrently (each is its own
         # network call) rather than one after another - a compound query
         # like "time and weather in X" would otherwise pay for two full
-        # round-trips back to back.
-        results = await asyncio.gather(
-            *(self._run_tool_with_fallback(state, tool_name) for tool_name in detected_tools)
-        )
+        # round-trips back to back. Timeout/retry/transient-fallback/caching/
+        # rate-limiting all live in ToolExecutor now, shared with LLMNode's
+        # native function-calling path so both behave identically.
+        calls = [(tool_name, self._build_arguments(state, tool_name)) for tool_name in detected_tools]
+        results = await self._executor.run_many(calls, user_id=state.get("user_id"))
 
         return {
-            "tool_results": list(results),
+            "tool_results": results,
             "selected_tool": detected_tools[0],
             "needs_user_input": False,
         }
-
-    async def _run_tool_with_fallback(self, state: dict[str, Any], tool_name: str) -> dict[str, Any]:
-        """Run a tool, transparently retrying against its fallback tool on failure.
-
-        Only applies to tools listed in `_FALLBACK_TOOLS` - everything else
-        just runs `_run_tool` directly. This is what makes a SerpAPI outage
-        (bad key, exhausted quota, provider downtime) degrade to the free
-        web_search tool instead of returning nothing for a live-data question.
-        """
-        result = await self._run_tool(state, tool_name)
-        fallback_name = _FALLBACK_TOOLS.get(tool_name)
-        if result.get("success") or not fallback_name or not self._registry.has(fallback_name):
-            return result
-
-        logger.warning(
-            "Tool '%s' failed (%s), falling back to '%s'",
-            tool_name, result.get("error"), fallback_name,
-        )
-        fallback_result = await self._run_tool(state, fallback_name)
-        if fallback_result.get("success"):
-            fallback_result["metadata"] = {
-                **(fallback_result.get("metadata") or {}),
-                "fallback_from": tool_name,
-            }
-            return fallback_result
-        # Both failed - surface the primary tool's error (what was actually
-        # asked for), not the fallback's, since it's the more informative one.
-        return result
-
-    async def _run_tool(self, state: dict[str, Any], tool_name: str) -> dict[str, Any]:
-        """Execute a single tool with a timeout and retries, in the standard result shape.
-
-        Every attempt gets its own `_TOOL_TIMEOUT_SECONDS` budget so a stuck
-        network call can't stall the whole turn; failures that look
-        transient get up to `_MAX_TOOL_ATTEMPTS` tries total with a short
-        backoff, while deterministic failures (bad args, unsupported input)
-        return immediately after the first attempt.
-        """
-        if not self._registry.has(tool_name):
-            return {"tool": tool_name, "success": False, "error": f"tool_not_found:{tool_name}"}
-        args = self._build_arguments(state, tool_name)
-
-        last_result: dict[str, Any] = {"tool": tool_name, "success": False, "error": "Tool did not run"}
-        for attempt in range(1, _MAX_TOOL_ATTEMPTS + 1):
-            try:
-                result = await asyncio.wait_for(
-                    self._registry.invoke(tool_name, **args), timeout=_TOOL_TIMEOUT_SECONDS
-                )
-                result_dict = result.to_dict()
-                result_dict["tool"] = tool_name
-                if result_dict.get("success") or not _is_transient(result_dict):
-                    return result_dict
-                last_result = result_dict
-            except asyncio.TimeoutError:
-                # A timeout is transient by definition - metadata isn't
-                # needed here since _run_tool's own retry loop below (not
-                # _is_transient) is what decides to try again in this branch.
-                last_result = {
-                    "tool": tool_name,
-                    "success": False,
-                    "error": f"Tool '{tool_name}' timed out after {_TOOL_TIMEOUT_SECONDS}s",
-                    "metadata": {"transient": True},
-                }
-            except Exception as exc:  # noqa: BLE001
-                # ToolRegistry.invoke already catches exceptions from inside
-                # the tool itself - reaching here means something failed
-                # even more fundamentally (e.g. argument construction).
-                last_result = {
-                    "tool": tool_name,
-                    "success": False,
-                    "error": f"Tool '{tool_name}' raised an unexpected error: {exc}",
-                    "metadata": {"transient": False},
-                }
-
-            if attempt < _MAX_TOOL_ATTEMPTS:
-                logger.warning(
-                    "Tool '%s' attempt %d/%d failed transiently, retrying: %s",
-                    tool_name, attempt, _MAX_TOOL_ATTEMPTS, last_result.get("error"),
-                )
-                await asyncio.sleep(0.5 * attempt)
-
-        return last_result
 
     def _build_arguments(self, state: dict[str, Any], tool_name: str) -> dict[str, Any]:
         """Build arguments for the given tool from state."""
@@ -271,11 +190,11 @@ class ToolSelectionNode:
                         break
             base_args["expression"] = expr.strip()
         elif tool_name == "current_time":
-            location = _extract_location(last_content)
+            location = _extract_location_for_tool(last_content, "current_time")
             if location:
                 base_args["location"] = location
         elif tool_name == "weather":
-            location = _extract_location(last_content)
+            location = _extract_location_for_tool(last_content, "weather")
             if not location:
                 # Fall back to prefix-stripping for phrasings the
                 # preposition pattern doesn't catch, e.g. "weather Paris".

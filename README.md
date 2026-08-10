@@ -15,6 +15,8 @@ Built with FastAPI + LangGraph on the backend and React 19 + TypeScript on the f
 - [Multimodal RAG Pipeline](#multimodal-rag-pipeline)
 - [Conversations, Memory & Sessions](#conversations-memory--sessions)
 - [Available Tools](#available-tools)
+- [Tool Orchestration & Performance](#tool-orchestration--performance)
+- [Chat Input Controls](#chat-input-controls)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
@@ -39,14 +41,19 @@ Ask it "what's the weather in Tokyo right now" and it actually calls a weather A
 ## Features
 
 - **LangGraph agent** — a real `StateGraph` with conditional routing, retry loops, and self-reflection (see [Agent Workflow](#agent-workflow))
-- **Live tool-calling** — current time (any timezone/city), weather, a calculator, web search (DuckDuckGo/SerpAPI), Wikipedia lookups, sandboxed Python execution, and knowledge-base search, selected automatically per message (regex fast-path + native LLM function-calling fallback for anything the fast-path misses)
+- **Live tool-calling with real orchestration** — current time (any timezone/city), weather, a calculator, web search (DuckDuckGo/SerpAPI), Wikipedia lookups, sandboxed Python execution, and knowledge-base search, selected automatically per message (regex fast-path + native LLM function-calling fallback). Independent tools in the same turn run **concurrently**, dependent tools **chain** across bounded rounds when one's output feeds another, results are **cached** and **deduplicated** so the same call is never paid for twice, and everything is **rate-limited per user** (see [Tool Orchestration & Performance](#tool-orchestration--performance))
+- **Location-aware, self-correcting geocoding** — misspellings ("banglore"), historical/colonial names that resolve to the wrong place entirely ("Calcutta" → South Africa, "Saigon" → Chad on the raw API), and compound multi-city questions ("weather in Paris, what time is it in Tokyo") are all corrected and scoped per-tool before hitting a live weather/time lookup, with retries and population-aware disambiguation between same-named places
 - **Multimodal RAG** — upload PDF, DOCX, PPTX, TXT, Markdown, CSV, XLSX, JSON, XML, HTML, source code, or images; each is parsed, chunked, embedded, and indexed automatically, and is available for question-answering in that conversation immediately, with no need to re-reference it by name (see [Multimodal RAG Pipeline](#multimodal-rag-pipeline))
-- **Vision** — attach an image in chat and ask questions, request a description, extract text, or reason about the scene, via a real vision-capable model (GPT-4o / Gemini / OpenRouter), with a local-OCR-plus-text fallback if no vision provider is reachable
+- **OCR + vision fallback for scanned/image-based documents** — a PDF page, DOCX, or PPTX with no real text layer (a scan, a photo of a document, an embedded picture) is rendered and run through OCR (RapidOCR, pure Python/ONNX — no system Tesseract binary required) automatically; a standalone photo with no extractable text falls further back to a real vision-model description, so "image with no text" still indexes something meaningful
+- **Vision** — attach an image in chat and ask questions, request a description, extract text, or reason about the scene, via a real vision-capable model (GPT-4o / Gemini / OpenRouter), with a local-OCR-plus-text fallback if no vision provider is reachable. Click any thumbnail for a full lightbox with zoom, pan, and download
 - **Durable, thread-scoped memory** — conversation history is rebuilt from the database on every turn, not trusted to an in-process cache, so it survives a server restart and is consistent across devices; long-term facts (name, preferences, entities) are remembered globally across every conversation, while each thread's own uploaded files and message history stay scoped to that thread (see [Conversations, Memory & Sessions](#conversations-memory--sessions))
 - **Multi-provider LLM routing** — OpenAI, Gemini, Groq, and OpenRouter behind one interface, with an automatic fallback chain, per-provider cooldown on failure, and vision-aware routing that skips providers whose model can't accept images
 - **ChatGPT-style sessions** — persistent login with a shared auth context (not per-component state), remember-me, automatic session restoration, silent token refresh, and clean logout that revokes only the current session without touching any chats or memories
 - **Streaming responses** — token-by-token SSE streaming, with mid-generation tool-activity status ("Checking the weather…")
+- **Full message actions** — edit a past message in place (truncates and regenerates everything after it), regenerate any assistant reply, and copy any message's content
+- **Chat input controls** — a web-search toggle, an AI-tools picker fetched live from the backend's own tool registry, and real browser voice input (Web Speech API, with permission/error handling and a live "Listening…" indicator) — see [Chat Input Controls](#chat-input-controls)
 - **Auth & security** — JWT access/refresh tokens, server-side refresh-token revocation, account lockout, bcrypt password hashing, rate limiting (Redis-backed with in-memory fallback), CORS, security headers, and regex-based prompt-injection / jailbreak / content-filtering guardrails on every message
+- **Startup dependency validation** — every RAG parsing/OCR dependency (pypdf, python-docx, python-pptx, openpyxl, RapidOCR, PyMuPDF, ...) is import-checked at boot, logged loudly if anything's missing, and surfaced on `GET /health` — a broken interpreter is visible immediately instead of only failing on someone's first upload
 - **Observability** — structured JSON logging at every RAG/agent stage, OpenTelemetry tracing, and optional LangSmith tracing for the agent graph
 - **MCP integration** — the tool registry doubles as a FastMCP server, so the same tools are usable by any MCP-compatible client
 - **Docker-ready** — `docker-compose up --build` runs the full stack; SQLite by default for zero-config local dev, PostgreSQL for production
@@ -103,11 +110,11 @@ flowchart TD
     MR --> RAG["<b>rag_retrieval</b><br/>this thread's documents (deterministic) +<br/>hybrid search across the rest of the KB (semantic)"]
     RAG --> ID["<b>intent_detection</b><br/>regex heuristics: tool / calculation / rag / ask_user / chat"]
 
-    ID -->|"tool, calculation, rag, or ask_user"| TS["<b>tool_selection</b><br/>runs every matched tool concurrently<br/>(weather, time, calculator, search, wikipedia, KB, ...)"]
+    ID -->|"tool, calculation, rag, or ask_user"| TS["<b>tool_selection</b><br/>every matched tool run through ToolExecutor:<br/>concurrent execution, retry+fallback, cache, rate limit"]
     ID -->|"general conversation"| LLM
 
     TS -->|"needs clarification"| END2(["Ask user a follow-up question"])
-    TS --> LLM["<b>llm_node</b><br/>provider fallback chain (Groq → Gemini → OpenRouter → OpenAI)<br/>vision routing when images are attached<br/>native function-calling fallback if no tool matched"]
+    TS --> LLM["<b>llm_node</b><br/>provider fallback chain (Groq → Gemini → OpenRouter → OpenAI)<br/>vision routing when images are attached<br/>native function-calling fallback, bounded multi-round<br/>chaining when one tool's result feeds another"]
 
     LLM --> RF["<b>reflection</b><br/>self-check answer quality"]
     RF -->|"fails, retries left"| LLM
@@ -119,7 +126,7 @@ flowchart TD
     FMT --> END3(["Response streamed to the user"])
 ```
 
-**Why this matters in practice:** intent detection is a fast regex pre-filter, not the only path to a tool call — if it misses a live-data question, `llm_node` still offers the LLM native function-calling as a fallback. Every LLM call goes through the provider fallback chain, so a single provider outage degrades gracefully to the next one instead of failing the turn. And `rag_retrieval` doesn't rely on semantic similarity alone: a vague question like *"describe this file"* has almost no vector similarity to the file's actual content, so the documents uploaded in the current thread are always included, deterministically — see the next section.
+**Why this matters in practice:** intent detection is a fast regex pre-filter, not the only path to a tool call — if it misses a live-data question, `llm_node` still offers the LLM native function-calling as a fallback. Every LLM call goes through the provider fallback chain, so a single provider outage degrades gracefully to the next one instead of failing the turn. `tool_selection` and `llm_node`'s native function-calling both execute through the exact same `ToolExecutor` (see [Tool Orchestration & Performance](#tool-orchestration--performance)), so a tool behaves identically — same timeout, retry, fallback, caching, rate-limiting — no matter which path triggered it. And `rag_retrieval` doesn't rely on semantic similarity alone: a vague question like *"describe this file"* has almost no vector similarity to the file's actual content, so the documents uploaded in the current thread are always included, deterministically — see the next section.
 
 ## Multimodal RAG Pipeline
 
@@ -127,9 +134,16 @@ Upload a file mid-conversation and it's parsed, chunked, embedded, and indexed s
 
 ```mermaid
 flowchart TD
-    UP(["File uploaded in a conversation"]) --> EXT["<b>DocumentProcessor</b><br/>extract text by type — PDF, DOCX, PPTX, XLSX,<br/>CSV, JSON, XML, HTML, Markdown, code, OCR for images"]
-    EXT -->|"no text extracted"| FAIL(["Marked FAILED with a specific reason —<br/>never silently 'succeeds' with nothing to retrieve"])
-    EXT -->|"text extracted"| CHUNK["Chunked (RecursiveCharacterTextSplitter)<br/>tagged with document_id · user_id · thread_id · file_type"]
+    UP(["File uploaded in a conversation"]) --> DETECT["<b>DocumentProcessor</b><br/>detect type, dispatch to the matching parser —<br/>PDF, DOCX, PPTX, XLSX, CSV, JSON, XML, HTML, Markdown, code, images"]
+    DETECT --> NATIVE{"Real text layer<br/>found natively?"}
+    NATIVE -->|"yes"| EXT["Native extraction<br/>(per-page/slide/sheet)"]
+    NATIVE -->|"no / too little text<br/>(scan, photo of a doc, embedded image)"| OCR["<b>OCR fallback</b><br/>render page/image → RapidOCR<br/>(pure Python/ONNX, no system Tesseract needed)<br/>→ pytesseract as a secondary fallback"]
+    OCR -->|"still no usable text<br/>(a photo/diagram, nothing to OCR)"| VISION["<b>Vision-model fallback</b><br/>describe the image via a vision-capable LLM"]
+    EXT --> GOTTEXT
+    OCR -->|"text recovered"| GOTTEXT["Text ready"]
+    VISION --> GOTTEXT
+    GOTTEXT -->|"still nothing extractable"| FAIL(["Marked FAILED with a specific reason —<br/>never silently 'succeeds' with nothing to retrieve"])
+    GOTTEXT -->|"text extracted"| CHUNK["Chunked (RecursiveCharacterTextSplitter)<br/>tagged with document_id · user_id · thread_id · file_type<br/>+ extraction_method metadata (native / ocr / hybrid)"]
     CHUNK --> EMBED["Embedded (OpenAI, falling back to a local<br/>sentence-transformers model if unavailable)"]
     EMBED --> STORE[("FAISS / ChromaDB")]
 
@@ -143,6 +157,7 @@ flowchart TD
     CTX --> LLMC["llm_node — answer grounded in<br/>the labeled context + citations"]
 ```
 
+- **Never rejects a supported file for being "just" an image or a scan**: a PDF is checked page-by-page — a hybrid document (some real pages, some scanned) gets `extraction_method: hybrid`, not an all-or-nothing failure. Every image (standalone or embedded in a DOCX/PPTX) is OCR'd, and a genuinely text-free photo still gets indexed via a vision-model description rather than being skipped.
 - **Deterministic thread-scoping**: `Document.thread_id` ties an upload to the conversation it happened in. `RAGRetrievalNode` fetches every chunk of every document in the current thread directly by id — no similarity threshold to clear, no ranking to lose. This is what makes "describe this file" work regardless of phrasing.
 - **Clearly labeled context**: thread documents and semantic-search results are never silently merged into one undifferentiated block — they're presented to the model as two distinct, labeled sections, so a broadly-relevant older document from a different conversation can't get confused for "the file" the user is currently asking about.
 - **Fails loud, not silent**: a corrupted file or an image with nothing OCR-able is marked `FAILED` with a specific, user-visible reason, instead of reporting success with zero indexed content (which is what used to produce "no file was provided"-style answers).
@@ -174,7 +189,61 @@ Auth state lives in a single shared React context (`AuthProvider`), not duplicat
 | `knowledge_base_search` | Hybrid search over your uploaded documents, optionally filtered by file type | *"What does my uploaded contract say about termination?"* |
 | `ask_user` | Asks a clarifying follow-up instead of guessing | *"Which one should I pick?"* |
 
-A single message can trigger several tools at once (e.g. *"what's the time and weather in Paris"* runs both concurrently).
+A single message can trigger several tools at once (e.g. *"what's the time and weather in Paris"* runs both concurrently) — see below for exactly how.
+
+## Tool Orchestration & Performance
+
+Every tool call — whether it came from the fast regex path (`tool_selection`) or the LLM's own native function-calling (`llm_node`) — runs through one shared engine: [`ToolExecutor`](backend/app/tools/executor.py). Before this existed, the two paths had genuinely different reliability: the regex path retried and timed out properly, native function-calling ran tools in a bare sequential loop with none of that. Now both get identical guarantees.
+
+```mermaid
+flowchart TD
+    REQ(["Compound request, e.g.<br/>'weather in Paris, time in Tokyo, and 458×37'"]) --> DETECT["Tools detected: weather, current_time, calculator"]
+    DETECT --> BATCH["<b>ToolExecutor.run_many()</b>"]
+
+    BATCH --> DEDUP{"Duplicate tool+args<br/>in this batch?"}
+    DEDUP -->|"yes"| ONE["Invoked once,<br/>result fanned out to every requester"]
+    DEDUP -->|"no"| PAR
+
+    subgraph PAR["Independent calls run CONCURRENTLY (asyncio.gather)"]
+        direction LR
+        W["weather(Paris)"]
+        T["current_time(Tokyo)"]
+        C["calculator(458*37)"]
+    end
+
+    PAR --> CACHE{"Cached from a<br/>recent identical call?"}
+    CACHE -->|"hit"| FAST["Return instantly — no API call"]
+    CACHE -->|"miss"| RATE{"Under this user's<br/>rate limit for this tool?"}
+    RATE -->|"no"| REJECT["Graceful rate-limit error<br/>(not a crash, not a retry storm)"]
+    RATE -->|"yes"| RUN["Invoke the real tool<br/>(20s timeout)"]
+
+    RUN -->|"transient failure<br/>(timeout, 5xx, connection)"| RETRY["Retry with backoff,<br/>up to 3 attempts"]
+    RUN -->|"deterministic failure"| ERR(["Clear error, no wasted retries"])
+    RETRY -->|"still failing, has a<br/>configured fallback"| FALLBACK["e.g. serp_search → web_search"]
+    RUN -->|"success"| RESULT(["Result cached (TTL varies by tool)<br/>and returned"])
+    FALLBACK --> RESULT
+
+    RESULT --> CHAIN{"llm_node's native<br/>function-calling: does the<br/>model want ANOTHER tool,<br/>using this result?"}
+    CHAIN -->|"yes, rounds < 4"| BATCH
+    CHAIN -->|"no, or round cap hit"| ANSWER(["Final answer, tools withheld<br/>so the turn always ends in a real reply"])
+```
+
+- **Parallel, not sequential** — independent tools in one request (or one native-function-calling round) run concurrently via `asyncio.gather`, not one after another. A 3-tool compound query takes as long as its *slowest* tool, not the sum of all three.
+- **Duplicate-call suppression** — the same tool+args requested twice in one batch (a known LLM quirk) is invoked once; every requester gets the same result.
+- **Caching, tuned per tool** — calculator/Wikipedia results cache for 5 minutes, weather for 90 seconds, web search for 30 seconds. `current_time` is **never** cached (would silently serve stale wall-clock time) and `knowledge_base_search` is **never** cached (results are user/thread-scoped, not safe to share process-wide).
+- **Per-user, per-tool rate limiting** — a sliding window (20 calls/60s by default) protects both upstream API quotas (SerpAPI, Open-Meteo) and against a runaway caller, with a clear rejection result instead of a crash or a silent hang.
+- **Retry + fallback** — transient failures (timeouts, 5xx, connection resets) get up to 3 attempts with backoff; deterministic failures (bad input) fail once, fast. `serp_search` transparently falls back to the free `web_search` tool on outage or quota exhaustion.
+- **Bounded multi-round chaining** — when a tool's result is genuinely needed by a *second* tool call (native function-calling only), the model is re-offered tools for up to 4 rounds so a dependent chain can complete, capped so a model that won't stop asking for tools can't loop indefinitely — the final round always withholds tools and forces a real answer.
+
+## Chat Input Controls
+
+Three controls sit in the message composer, each backed by real functionality rather than being cosmetic:
+
+| Control | Behavior |
+|---|---|
+| **Globe (web search)** | Toggles a one-shot "search the web for this" mode for the next message — phrased to land on the same deterministic intent-detection pattern a user typing it naturally would, so it's provably the same code path, not a separate hidden channel. |
+| **Sparkles (AI tools)** | Opens a popover that fetches the assistant's actual capabilities live from `GET /api/v1/tools` (backed by the same tool registry the agent uses) — a loading state while fetching, and clicking a tool inserts a working example prompt. Also houses the "detailed answer" one-shot mode. |
+| **Microphone (voice input)** | Real browser speech-to-text via the Web Speech API — live interim transcript streamed into the composer, a pulsing "Listening…" indicator, and specific error toasts for permission-denied / no-speech / no-microphone / unsupported-browser, not a silent no-op. |
 
 ## Tech Stack
 
@@ -186,7 +255,9 @@ A single message can trigger several tools at once (e.g. *"what's the time and w
 | LLM providers | OpenAI, Google Gemini, Groq, OpenRouter |
 | Database | SQLAlchemy (async) — SQLite (dev) / PostgreSQL (prod) |
 | Vector store | FAISS / ChromaDB, `sentence-transformers` embeddings, BM25 hybrid search |
-| Document parsing | pypdf, python-docx, python-pptx, openpyxl, BeautifulSoup, pytesseract |
+| Document parsing | pypdf, python-docx, python-pptx, openpyxl, pandas, BeautifulSoup |
+| OCR / scanned documents | RapidOCR (`rapidocr-onnxruntime`, pure Python/ONNX — no system Tesseract binary needed), PyMuPDF for page rendering, pytesseract as a secondary fallback |
+| Voice input | Web Speech API (`SpeechRecognition`), native to the browser — no third-party speech service |
 | Auth | JWT (access + refresh), bcrypt, server-side token revocation |
 | Cache / rate limiting | Redis (with in-memory fallback) |
 | Observability | OpenTelemetry, LangSmith |
@@ -205,19 +276,22 @@ ai-chatbot/
 │       └── hooks/, lib/    React Query hooks, API client, shared AuthProvider
 ├── backend/
 │   ├── app/
-│   │   ├── agents/         LangGraph StateGraph, nodes, prompts
-│   │   ├── tools/          tool registry + built-in tools
+│   │   ├── agents/         LangGraph StateGraph, nodes (incl. tool_selection, llm_node), prompts
+│   │   ├── tools/          tool registry, ToolExecutor (parallel/cache/retry/rate-limit),
+│   │   │                   geocoding (alias + fuzzy correction), built-in tools
 │   │   ├── llm/             provider abstraction, vision helpers, router with fallback
 │   │   ├── memory/         memory manager (short/long-term, entity, semantic)
-│   │   ├── rag/             document processing, embeddings, hybrid search, reranking
+│   │   ├── rag/             document processing (native + OCR + vision fallback), embeddings,
+│   │   │                   hybrid search, reranking
 │   │   ├── mcp/             FastMCP client & server
 │   │   ├── security/       guardrails (prompt injection, jailbreak, content filter)
-│   │   ├── api/v1/         REST endpoints (auth, users, threads, chat, models, memories, files)
+│   │   ├── api/v1/         REST endpoints (auth, users, threads, chat, models, memories, files, tools)
 │   │   ├── db/              SQLAlchemy models, session, lightweight migrations
 │   │   ├── services/       business logic (auth, chat, user, thread)
 │   │   ├── repositories/   data access layer
-│   │   └── core/           config, DI container, middleware, logging
-│   └── tests/               pytest suite — auth, config, security, tools, document processing, RAG pipeline
+│   │   └── core/           config, DI container, middleware, logging, startup dependency validation
+│   └── tests/               pytest suite — auth, config, security, tools, tool orchestration/chaining,
+│                             geocoding, weather/time, document processing, RAG pipeline
 ├── docs/                   architecture, API reference, DB schema, deployment guides
 ├── docker/                 Dockerfiles, docker-compose
 ├── deployment/             Kubernetes / CI-CD configs
@@ -300,6 +374,9 @@ Base URL: `/api/v1`. Every endpoint except `/auth/*` requires a `Bearer` access 
 | **Models** | `GET /models`, `GET /models/providers` |
 | **Memory** | `GET/POST /memories`, `PATCH/DELETE /memories/{id}`, `DELETE /memories` (clear all), `GET /memories/context` |
 | **Files** | `POST /files/upload`, `POST /files/documents` (upload + index for RAG, optional `thread_id` to scope it to a conversation), `GET /files/documents`, `DELETE /files/documents/{id}` |
+| **Tools** | `GET /tools` — the assistant's live capability list (name, description, example prompt), used by the frontend's AI-tools picker |
+
+`GET /health` (outside `/api/v1`, no auth required) reports overall status plus a `rag_dependencies` map of every parsing/OCR package and whether it actually imported in the running process — check this first if uploads start failing with a missing-module error.
 
 Full reference: [`docs/api.md`](docs/api.md).
 
@@ -337,10 +414,14 @@ Full reference: [`docs/database.md`](docs/database.md).
 # Backend
 cd backend
 pytest tests/ -v
-# Covers: auth, config, security, tools, document extraction for every
-# supported file type, and the full RAG pipeline (upload → thread-scoped
-# retrieval → context injection), using an isolated in-memory DB and an
-# offline fake embedder — no network calls, no shared state with your dev data.
+# Covers: auth, config, security, tools, tool-executor concurrency/caching/
+# rate-limiting/retry-fallback, multi-round tool chaining, geocoding
+# (alias/misspelling correction, disambiguation, retries), weather/time,
+# document extraction for every supported file type (incl. OCR fallback for
+# scanned PDFs and image-only documents), and the full RAG pipeline (upload
+# → thread-scoped retrieval → context injection) — using an isolated
+# in-memory DB and an offline fake embedder where applicable, no network
+# calls, no shared state with your dev data.
 
 # Frontend
 cd frontend

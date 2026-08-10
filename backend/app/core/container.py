@@ -15,6 +15,7 @@ from typing import Any
 
 from app.core.di import container
 from app.llm.router import ModelRouter
+from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 from typing import Any
 
@@ -42,6 +43,7 @@ class AppContainer:
         self._retriever: Retriever | None = None
         self._processor: DocumentProcessor | None = None
         self._agent: Any = None
+        self._tool_executor: ToolExecutor | None = None
 
     # ------------------------------------------------------------------
     # Core services
@@ -93,6 +95,18 @@ class AppContainer:
             except Exception as exc:  # noqa: BLE001
                 logger.error("Tool registration failed: %s", exc)
         return self._tools
+
+    @property
+    def tool_executor(self) -> ToolExecutor:
+        """Return the shared tool executor (timeouts/retry/fallback/cache/rate-limit).
+
+        One instance for the process lifetime - both `ToolSelectionNode` and
+        `LLMNode` use it, so its cache and rate-limit windows actually
+        accumulate across requests instead of resetting every turn.
+        """
+        if self._tool_executor is None:
+            self._tool_executor = ToolExecutor(self.tool_registry)
+        return self._tool_executor
 
     # ------------------------------------------------------------------
     # RAG services
@@ -178,6 +192,7 @@ class AppContainer:
                 # request-scoped MemoryManager; its nodes open their own session.
                 memory_manager=None,
                 retriever=retriever,
+                tool_executor=self.tool_executor,
             )
         return self._agent
 

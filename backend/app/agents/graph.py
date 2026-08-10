@@ -97,6 +97,7 @@ class AgentGraph:
         reranker: Any = None,
         guardrails: Any = None,
         checkpointer: Any = None,
+        tool_executor: Any = None,
     ) -> None:
         self.model_router = model_router
         self.memory_manager = memory_manager
@@ -105,6 +106,16 @@ class AgentGraph:
         self.retriever = retriever
         self.guardrails = guardrails
         self.checkpointer = checkpointer or MemorySaver()
+        # Shared by both tool-calling paths (regex fast-path and native
+        # function-calling) so timeouts/retry/fallback/caching/rate-limiting
+        # behave identically regardless of which one triggered a tool -
+        # falls back to building one locally (e.g. for tests that construct
+        # AgentGraph without going through the DI container).
+        if tool_executor is None:
+            from app.tools.executor import ToolExecutor
+
+            tool_executor = ToolExecutor(tool_registry)
+        self.tool_executor = tool_executor
         self.graph = self._build()
 
     def _build(self) -> Any:
@@ -116,8 +127,10 @@ class AgentGraph:
         context_builder_node = context_builder.ContextBuilderNode()
         memory_retrieval_node = memory_retrieval.MemoryRetrievalNode(self.memory_manager)
         intent_detection_node = intent_detection.IntentDetectionNode()
-        tool_selection_node = tool_selection.ToolSelectionNode(self.tool_registry)
-        llm_node_instance = llm_node.LLMNode(self.model_router, tool_registry=self.tool_registry)
+        tool_selection_node = tool_selection.ToolSelectionNode(self.tool_registry, tool_executor=self.tool_executor)
+        llm_node_instance = llm_node.LLMNode(
+            self.model_router, tool_registry=self.tool_registry, tool_executor=self.tool_executor
+        )
         reflection_node = reflection.ReflectionNode()
         answer_validation_node = answer_validation.AnswerValidationNode()
         formatting_node = formatting.FormattingNode()

@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     memories,
     models,
     threads,
+    tools,
     users,
 )
 
@@ -25,3 +26,4 @@ api_router.include_router(chat.router, prefix="/chat", tags=["Chat"])
 api_router.include_router(models.router, prefix="/models", tags=["Models"])
 api_router.include_router(memories.router, prefix="/memories", tags=["Memory"])
 api_router.include_router(files.router, prefix="/files", tags=["Files"])
+api_router.include_router(tools.router, prefix="/tools", tags=["Tools"])

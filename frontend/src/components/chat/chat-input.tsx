@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect } from "react";
-import { Paperclip, Mic, Send, Square, Sparkles, Loader2, FileText, X, Globe, Image as ImageIcon } from "lucide-react";
+import { Paperclip, Mic, Send, Square, Loader2, FileText, X, Globe, Image as ImageIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ModelSelector } from "@/components/chat/model-selector";
 import { QuickActions } from "@/components/chat/quick-actions";
+import { AiToolsMenu } from "@/components/chat/ai-tools-menu";
+import { useVoiceInput } from "@/hooks/use-voice-input";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
 import type { DocumentInfo } from "@/types";
@@ -40,7 +43,6 @@ interface ChatInputProps {
 export function ChatInput({ onSend, onStop, isStreaming, ensureThreadId }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [model, setModel] = useState("");
-  const [isRecording, setIsRecording] = useState(false);
   const [attachedDoc, setAttachedDoc] = useState<DocumentInfo | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
@@ -88,12 +90,20 @@ export function ChatInput({ onSend, onStop, isStreaming, ensureThreadId }: ChatI
     }
   };
 
-  const handleVoice = () => {
-    if (!("webkitSpeechRecognition" in window || "SpeechRecognition" in window)) {
-      toast.error("Voice input isn't supported in this browser");
-      return;
-    }
-    setIsRecording((prev) => !prev);
+  // Text present before recording started - re-applied under the live
+  // transcript on every result event so voice input appends to (rather than
+  // clobbers) whatever was already typed, and repeated interim updates
+  // replace only the spoken portion instead of duplicating words.
+  const baseMessageRef = useRef("");
+  const { isListening, isSupported: isVoiceSupported, toggle: toggleVoice } = useVoiceInput({
+    onTranscript: (text) => {
+      setMessage(baseMessageRef.current ? `${baseMessageRef.current} ${text}` : text);
+    },
+  });
+
+  const handleVoiceClick = () => {
+    if (!isListening) baseMessageRef.current = message.trim();
+    toggleVoice();
   };
 
   const handleAttachClick = () => {
@@ -229,77 +239,111 @@ export function ChatInput({ onSend, onStop, isStreaming, ensureThreadId }: ChatI
             className="hidden"
             onChange={handleImagesSelected}
           />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="shrink-0 rounded-full"
-            onClick={handleAttachClick}
-            disabled={isUploading}
-            aria-label="Attach a document"
-            title="Attach a document (indexed for search)"
-          >
-            {isUploading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Paperclip className="h-4 w-4" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="shrink-0 rounded-full"
+                onClick={handleAttachClick}
+                disabled={isUploading}
+                aria-label="Attach a document"
+              >
+                {isUploading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Paperclip className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Attach a document (indexed for search)</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("shrink-0 rounded-full", attachedImages.length > 0 && "bg-accent text-primary")}
+                onClick={handleImageAttachClick}
+                disabled={attachedImages.length >= MAX_IMAGES}
+                aria-label="Attach an image"
+              >
+                <ImageIcon className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Attach an image to ask about</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("shrink-0 rounded-full", webSearchMode && "bg-accent text-primary")}
+                onClick={() => setWebSearchMode((v) => !v)}
+                aria-label="Search the web for this message"
+                aria-pressed={webSearchMode}
+              >
+                <Globe className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{webSearchMode ? "Web search is on for this message" : "Search the web for this message"}</TooltipContent>
+          </Tooltip>
+
+          <div className="relative min-w-0 flex-1">
+            <Textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Message Lumina AI..."
+              className="min-h-[40px] flex-1 resize-none border-0 bg-transparent focus-visible:ring-0"
+              rows={1}
+            />
+            {isListening && (
+              <div className="pointer-events-none absolute -top-6 left-0 flex items-center gap-1.5 text-xs text-destructive">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-destructive" />
+                </span>
+                Listening...
+              </div>
             )}
-          </Button>
+          </div>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("shrink-0 rounded-full", attachedImages.length > 0 && "bg-accent text-primary")}
-            onClick={handleImageAttachClick}
-            disabled={attachedImages.length >= MAX_IMAGES}
-            aria-label="Attach an image"
-            title="Attach an image to ask about"
-          >
-            <ImageIcon className="h-4 w-4" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("shrink-0 rounded-full", webSearchMode && "bg-accent text-primary")}
-            onClick={() => setWebSearchMode((v) => !v)}
-            aria-label="Search the web for this message"
-            aria-pressed={webSearchMode}
-            title="Search the web for this message"
-          >
-            <Globe className="h-4 w-4" />
-          </Button>
-
-          <Textarea
-            ref={textareaRef}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Message Lumina AI..."
-            className="min-h-[40px] flex-1 resize-none border-0 bg-transparent focus-visible:ring-0"
-            rows={1}
+          <AiToolsMenu
+            detailedMode={detailedMode}
+            onToggleDetailedMode={() => setDetailedMode((v) => !v)}
+            onSelectTool={(examplePrompt) => {
+              if (!examplePrompt) return;
+              setMessage((prev) => (prev ? `${prev}\n${examplePrompt}` : examplePrompt));
+              textareaRef.current?.focus();
+            }}
           />
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("shrink-0 rounded-full", detailedMode && "bg-accent text-primary")}
-            onClick={() => setDetailedMode((v) => !v)}
-            aria-label="Ask for a more detailed answer"
-            aria-pressed={detailedMode}
-            title="Ask for a more detailed answer"
-          >
-            <Sparkles className="h-4 w-4" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("shrink-0 rounded-full", isRecording && "text-destructive")}
-            onClick={handleVoice}
-            aria-label={isRecording ? "Stop recording" : "Voice input"}
-          >
-            {isRecording ? <Square className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn("shrink-0 rounded-full", isListening && "text-destructive")}
+                onClick={handleVoiceClick}
+                disabled={!isVoiceSupported}
+                aria-label={isListening ? "Stop recording" : "Voice input"}
+                aria-pressed={isListening}
+              >
+                {isListening ? <Square className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isVoiceSupported
+                ? isListening
+                  ? "Stop recording"
+                  : "Voice input"
+                : "Voice input isn't supported in this browser"}
+            </TooltipContent>
+          </Tooltip>
 
           {isStreaming ? (
             <Button size="icon" variant="secondary" className="shrink-0 rounded-full" onClick={onStop}>

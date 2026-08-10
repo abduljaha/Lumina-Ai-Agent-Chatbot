@@ -19,6 +19,13 @@ from app.llm.vision import parse_data_url
 
 logger = logging.getLogger("app")
 
+# Bounded so a model that keeps requesting tools (a dependent chain, or one
+# that just won't stop) always ends the turn in a real answer rather than
+# looping - or costing - indefinitely. 4 rounds comfortably covers realistic
+# chains (e.g. geocode -> weather -> unit conversion) while keeping a
+# runaway worst case at 4 extra LLM round-trips, not unbounded.
+_MAX_TOOL_ROUNDS = 4
+
 
 def _ocr_fallback_text(images: list[str]) -> str:
     """Best-effort local OCR over image attachments.
@@ -59,12 +66,22 @@ class LLMNode:
     Handles provider selection, fallback, and reflection feedback.
     """
 
-    def __init__(self, router: ModelRouter, tool_registry: Any | None = None) -> None:
+    def __init__(self, router: ModelRouter, tool_registry: Any | None = None, tool_executor: Any | None = None) -> None:
         self._router = router
         # Optional: enables native LLM function-calling as a fallback for
         # live-data questions intent_detection's regex patterns don't
         # recognize (see __call__) - graceful no-op if not provided.
         self._tool_registry = tool_registry
+        # Same executor instance ToolSelectionNode uses (shared via
+        # AgentGraph/AppContainer) - gives native function-calling the same
+        # timeout/retry/fallback/caching/rate-limiting, and means a tool
+        # already called by the regex fast-path this turn is cache-hit, not
+        # re-invoked, if the model's own tool-calling asks for it again.
+        if tool_executor is None and tool_registry is not None:
+            from app.tools.executor import ToolExecutor
+
+            tool_executor = ToolExecutor(tool_registry)
+        self._executor = tool_executor
 
     async def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         """Generate a response using the configured LLM."""
@@ -191,24 +208,51 @@ class LLMNode:
 
         latency = int((time.perf_counter() - start) * 1000)
 
-        # The model itself decided a tool call was needed (only possible
-        # when offer_tools was True) - run the requested tool(s) now and
-        # make one bounded follow-up call (no tools offered this time, so
-        # this can't recurse) with their results folded in as context,
-        # rather than leaving the turn dangling with no generation at all.
-        if response.tool_calls and self._tool_registry is not None:
-            used_tool_results = await self._execute_tool_calls(response.tool_calls, state)
-            followup_messages = llm_messages + [
-                {"role": "system", "content": build_tool_results_message(used_tool_results)}
+        # The model decided a tool call was needed (only possible when
+        # offer_tools was True). Tools stay offered across rounds - not just
+        # one follow-up - so a genuinely DEPENDENT chain (e.g. resolve a
+        # location, then use its coordinates in a second call) can complete;
+        # bounded by _MAX_TOOL_ROUNDS so a model that won't stop asking for
+        # tools can't loop indefinitely. Each round's tool calls run
+        # concurrently via ToolExecutor (see _execute_tool_calls), and its
+        # cache means asking for the same tool+args again - across rounds,
+        # or repeating what the regex fast-path already ran - doesn't pay
+        # for a second real call.
+        round_messages = llm_messages
+        rounds = 0
+        while response.tool_calls and self._tool_registry is not None and rounds < _MAX_TOOL_ROUNDS:
+            rounds += 1
+            round_results = await self._execute_tool_calls(response.tool_calls, state)
+            used_tool_results = used_tool_results + round_results
+            round_messages = round_messages + [
+                {"role": "system", "content": build_tool_results_message(round_results)}
             ]
-            followup_request = LLMRequest(
-                messages=followup_messages,
+            if rounds >= _MAX_TOOL_ROUNDS:
+                break  # force the final untooled call below rather than asking again
+            next_request = LLMRequest(
+                messages=round_messages,
                 model=requested_model,
                 temperature=0.7,
                 max_tokens=2048,
                 stream=False,
+                tools=self._tool_registry.to_openai_schemas(),
             )
-            response = await self._router.generate(followup_request, provider=provider)
+            try:
+                response = await self._router.generate_with_tools(next_request, provider=provider)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Tool-calling generation failed mid-chain, finishing without further tools: %s", exc)
+                break
+            latency = int((time.perf_counter() - start) * 1000)
+
+        if rounds > 0 and response.tool_calls:
+            # Loop ended by hitting the round cap (not by the model settling
+            # on a real answer) - tools are withheld this time so the call
+            # can't ask for yet another round; it must answer with whatever
+            # context it has so the turn never ends without a real reply.
+            final_request = LLMRequest(
+                messages=round_messages, model=requested_model, temperature=0.7, max_tokens=2048, stream=False,
+            )
+            response = await self._router.generate(final_request, provider=provider)
             latency = int((time.perf_counter() - start) * 1000)
 
         return {
@@ -227,12 +271,12 @@ class LLMNode:
     ) -> list[dict[str, Any]]:
         """Run tool call(s) the model requested via native function-calling.
 
-        Mirrors the standard tool result shape (`tool_selection.py`'s
-        `_run_tool`) so downstream consumers - `build_tool_results_message`,
-        reflection, the persisted message metadata - treat these identically
-        to regex-routed tool calls, without needing to know which path ran.
+        Delegates to the same `ToolExecutor` `tool_selection.py` uses, so a
+        model-requested tool gets identical timeout/retry/transient-fallback/
+        caching/rate-limiting - and independent tools in the same round run
+        concurrently instead of one after another.
         """
-        results: list[dict[str, Any]] = []
+        calls: list[tuple[str, dict[str, Any]]] = []
         for call in tool_calls:
             name = call.get("name", "")
             raw_args = call.get("arguments")
@@ -250,11 +294,26 @@ class LLMNode:
                 except json.JSONDecodeError:
                     args = {}
             args.setdefault("user_id", state.get("user_id"))
-            try:
-                result = await self._tool_registry.invoke(name, **args)
-                result_dict = result.to_dict()
-            except Exception as exc:  # noqa: BLE001
-                result_dict = {"success": False, "output": None, "error": str(exc), "metadata": {}}
-            result_dict["tool"] = name
-            results.append(result_dict)
-        return results
+            calls.append((name, args))
+
+        if not calls:
+            return []
+        if self._executor is None:
+            # No shared executor wired (e.g. a test constructing LLMNode
+            # with a tool_registry but no executor) - execute directly,
+            # concurrently, with no retry/cache/rate-limit rather than
+            # silently dropping the requested tool calls.
+            async def _invoke(name: str, args: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    result = await self._tool_registry.invoke(name, **args)
+                    result_dict = result.to_dict()
+                except Exception as exc:  # noqa: BLE001
+                    result_dict = {"success": False, "output": None, "error": str(exc), "metadata": {}}
+                result_dict["tool"] = name
+                return result_dict
+
+            import asyncio
+
+            return list(await asyncio.gather(*(_invoke(name, args) for name, args in calls)))
+
+        return await self._executor.run_many(calls, user_id=state.get("user_id"))

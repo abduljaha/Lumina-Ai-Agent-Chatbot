@@ -12,11 +12,15 @@
   the exact command it ran to start it yourself later. The commands used
   are printed below before each window opens.
 
-  The backend's own backend\.venv is missing the LangGraph/LangChain stack
-  (see backend\requirements.txt vs what's actually installed there), so this
-  script picks whichever Python interpreter on the machine actually has the
-  full stack importable, trying backend\.venv first, then the system Python,
-  then PATH.
+  The backend ALWAYS runs on backend\.venv\Scripts\python.exe - that venv has
+  the full stack (FastAPI/LangGraph and every RAG parser/OCR dependency:
+  pypdf, docx, pptx, openpyxl, rapidocr_onnxruntime, fitz, pytesseract, ...).
+  This script never silently falls back to the system Python or PATH: doing
+  so previously caused uploads to fail at runtime with "No module named
+  'pypdf'"/"No module named 'docx'" because the system interpreter doesn't
+  have the RAG stack installed. If the venv is missing or incomplete, the
+  script now fails loudly with the exact `pip install` command to fix it
+  instead of quietly launching a broken backend.
 
 .PARAMETER SkipBrowser
   Don't auto-open the frontend URL when both servers are healthy.
@@ -33,21 +37,24 @@ $backendPort = 8001
 $frontendPort = 5173
 
 function Resolve-BackendPython {
-    $candidates = @(
-        (Join-Path $backendDir ".venv\Scripts\python.exe"),
-        "C:\Users\ADIL KHAN\AppData\Local\Programs\Python\Python312\python.exe",
-        "python"
-    )
-    foreach ($c in $candidates) {
-        if (-not (Get-Command $c -ErrorAction SilentlyContinue) -and -not (Test-Path $c)) { continue }
-        # Routed through cmd.exe so a failing import's stderr doesn't get
-        # wrapped into a terminating NativeCommandError under $ErrorActionPreference=Stop.
-        cmd /c "`"$c`" -c `"import langgraph, fastapi, uvicorn`" 1>nul 2>nul"
-        if ($LASTEXITCODE -eq 0) { return $c }
+    $venvPython = Join-Path $backendDir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPython)) {
+        throw "backend\.venv not found at '$venvPython'. Create it and install deps:`n  cd backend; python -m venv .venv; .venv\Scripts\pip install -r requirements.txt"
     }
-    Write-Warning "No Python interpreter with the full backend stack (langgraph/fastapi/uvicorn) was found."
-    Write-Warning "Run: pip install -r `"$backendDir\requirements.txt`"  (into whichever interpreter you intend to use)"
-    return "python"
+
+    # Critical modules across the whole backend: web framework/agent stack
+    # plus every RAG parser/OCR dependency. Checked as one list (not just
+    # langgraph/fastapi/uvicorn) so a partially-installed venv fails loudly
+    # here instead of surfacing later as a per-upload "No module named 'x'".
+    $criticalModules = "langgraph", "fastapi", "uvicorn", "pypdf", "docx", "pptx", "openpyxl", "pandas", "bs4", "rapidocr_onnxruntime", "fitz", "pytesseract"
+    $importExpr = ($criticalModules -join ", ")
+    # Routed through cmd.exe so a failing import's stderr doesn't get
+    # wrapped into a terminating NativeCommandError under $ErrorActionPreference=Stop.
+    $checkOutput = cmd /c "`"$venvPython`" -c `"import $importExpr`" 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        throw "backend\.venv is missing required packages:`n$checkOutput`nFix with: cd backend; .venv\Scripts\pip install -r requirements.txt"
+    }
+    return $venvPython
 }
 
 function Stop-StaleProject($port) {

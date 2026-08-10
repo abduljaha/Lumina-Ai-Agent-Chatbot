@@ -9,12 +9,13 @@ import { ChatPage } from "@/pages/chat";
 import { SettingsPage } from "@/pages/settings";
 import { ProfilePage } from "@/pages/profile";
 import { LoadingScreen } from "@/components/loading-screen";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 export default function App() {
   const { isLoading } = useAuth();
 
   return (
-    <>
+    <TooltipProvider delayDuration={300}>
       <div className="aurora-backdrop">
         <div className="aurora-blob-3" />
       </div>
@@ -48,6 +49,6 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       )}
-    </>
+    </TooltipProvider>
   );
 }
