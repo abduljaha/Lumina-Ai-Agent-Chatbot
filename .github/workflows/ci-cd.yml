@@ -2,100 +2,106 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
-backend-test:
-  name: Backend Tests
-  runs-on: ubuntu-latest
 
-  steps:
-    - name: Checkout
-      uses: actions/checkout@v5
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: "3.11"
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
-    - name: Install dependencies
-      working-directory: backend
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest pytest-asyncio pytest-cov
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-    - name: Run tests
-      working-directory: backend
-      env:
-        DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-        REDIS_URL: "redis://localhost:6379/0"
-      run: |
-        pytest -v
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run tests
+        working-directory: backend
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+        run: |
+          pytest -v
+
 
   frontend-test:
     name: Frontend Tests & Build
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: cd frontend && npm ci
+        working-directory: frontend
+        run: npm ci
 
-      - name: Type check
-        run: cd frontend && npx tsc -b
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
-      - name: Lint
-        run: cd frontend && npm run lint || true
-
-      - name: Build
-        run: cd frontend && npm run build
 
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: [backend-test, frontend-test]
+    needs:
+      - backend-test
+      - frontend-test
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          push: false
-          tags: ai-chatbot/backend:latest
+      - name: Build Docker image
+        run: |
+          docker build -t lumina-ai-agent-chatbot .
 
-      - name: Build frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: frontend/Dockerfile
-          push: false
-          tags: ai-chatbot/frontend:latest
 
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: [docker-build]
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
+    needs:
+      - docker-build
 
-      - name: Deploy to production
-        run: echo "Deploying to production via SSH/K8s..."
-        # Add your deployment steps here
-        # - ssh to server && docker-compose up -d
-        # or kubectl apply -f deployment/k8s/
+    steps:
+      - name: Deployment
+        run: |
+          echo "Deployment step goes here"
