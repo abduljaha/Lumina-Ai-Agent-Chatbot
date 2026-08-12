@@ -55,8 +55,6 @@ duckduckgo-search==7.1.1
 
 # Streaming / Multimodal
 sse-starlette==2.2.0
-openai-whisper==20240930
-gTTS==2.5.4
 pytesseract==0.3.13
 opencv-python-headless==4.10.0.84
 
