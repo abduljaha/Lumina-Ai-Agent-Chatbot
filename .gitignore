@@ -53,3 +53,6 @@ docker-compose.override.yml
 *.pyc
 *.pyd
 *.so
+
+# User-uploaded files
+backend/uploads/
